@@ -1,9 +1,23 @@
-# REVIEW.md
+# REVIEW.md — Defects found in the starter `app/main.py`
 
-List every defect you found in the starter `app/main.py` (helpers and endpoints). For each one:
-
-| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How I fixed it |
 |---|---|---|---|---|
-| 1 | | | | |
+| 1 | `list_employees` / line 93 | **Off-by-one pagination:** `skip = page * page_size` skips `page_size` rows even on page 1. Page 1 returns rows 21-40 instead of 1-20. | `GET /employees?page=1` returns no results when fewer than 21 employees exist. | Changed to `skip = (page - 1) * page_size`. |
+| 2 | `list_employees` / line 94 | **`total` ignores the filter:** `count_documents({})` counts all employees, not those matching the `department` filter. Page metadata is wrong when filtering. | `GET /employees?department=HR` returns `total=100` even if only 5 HR employees exist. | Changed to `count_documents(q)` (uses the same query dict `q`). |
+| 3 | `punch_in` / line 102 | **`datetime.fromtimestamp` uses the OS local timezone, not UTC.** On an IST server the converted instant is wrong by ±5:30. | On an IST machine, `punched_at=1783312500000` (09:28 UTC) would be read as 14:58 IST and stamped as the wrong instant. | Changed to `datetime.fromtimestamp(ms/1000, tz=timezone.utc)` so the result is always UTC-aware. |
+| 4 | `punch_in` / line 113 | **`emp` is never checked for `None` before accessing `emp["shift_start"]`.** If the employee doesn't exist the code crashes with `TypeError` (dict subscript on None) instead of returning 404. | `POST /attendance/punch-in` with a nonexistent `emp_code` causes a 500. | Added `if emp is None: raise HTTPException(404, "Employee not found")` before use. |
+| 5 | `list_attendance` / lines 144-150 | **All documents fetched into memory then sorted/paginated in Python.** On 100 k records this is O(n) memory and time. `total = len(docs)` also fetches everything just to count. | Extremely slow and memory-intensive on large collections; the spec explicitly says "do not load the collection into memory". | Replaced with `count_documents(q)` for total, and `.sort().skip().limit()` pushed to MongoDB; the compound index `(date DESC, emp_code ASC)` makes this fast. |
+| 6 | `compute_overtime` / line 46 | **`datetime.fromisoformat(date_str).replace(tzinfo=IST)` on an arbitrary date string, where `date_str` is the attendance date, not the punch-out date.** For overnight shifts the shift end falls on the *next* calendar day; using the attendance date gives a shift-end that is 24 hours early and wildly inflated overtime. | An overnight-shift employee punching out at 06:40 would get 8h40m = 520 min overtime instead of 40 min. | Rewrote `compute_overtime_minutes` in `app/main.py` to add `timedelta(days=1)` for overnight shifts. |
+| 7 | `compute_late_minutes` / line 35 | **`punch_in.replace(hour=h, minute=m, ...)` reuses `punch_in`'s timezone (which is naive/local).** For UTC-stored datetimes the IST shift-start is built at the wrong offset. | Any late-minutes calculation on a server whose local clock ≠ IST returns wrong results. | `app/main.py` explicitly constructs the shift-start as `datetime(..., tzinfo=IST)` and compares in total seconds, so the result is timezone-correct. |
+| 8 | `/health` / line 73 | **Always returns `{"status": "ok"}` even when MongoDB is down.** The spec says `/health` should return 503 if MongoDB doesn't answer. | The runner polls `/health` before testing; it would never learn the DB is unreachable. | Added `db.command("ping")` wrapped in try/except; raises 503 on failure. |
+| 9 | `create_employee` / line 82 | **`datetime.now()` is naive (no timezone).** PyMongo stores it but the epoch-ms conversion in the response is undefined for naive datetimes. | `created_at` in the response is wrong or throws a TypeError during conversion. | Changed to `datetime.now(tz=timezone.utc)`. |
+| 10 | `punch_in` / line 104 | **Check-then-insert is not atomic:** the find_one + insert_one pair has a race window where two concurrent punch-ins for the same (emp_code, date) can both pass the existence check and both succeed. | Two simultaneous POST requests with the same employee + date both return 201 (duplicated records). | Removed the check; rely solely on the `UNIQUE` index on `(emp_code, date)` — the second insert raises `DuplicateKeyError` which is caught and returned as 409. |
 
-Also note anything you looked at and decided was **not** a defect, and why.
+## Things I reviewed and decided were **not** defects
+
+| What | Conclusion |
+|---|---|
+| `datetime.timedelta(hours=5, minutes=30)` for IST | Correct constant. |
+| `round((punch_out - punch_in).total_seconds() / 3600, 2)` | The helper existed but wasn't used in punch-out. The formula is correct in isolation; the bug was that it used Python's banker's rounding (`round()`). I replaced it with half-up rounding per R4. |
+| `status: str = "PRESENT"` default | Acceptable default per spec; I added an explicit enum validator. |
+| The `history: []` initializer | Correct — each new punch-in starts with an empty audit trail. |
