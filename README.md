@@ -1,6 +1,32 @@
 # Employee Attendance & Analytics API
 
-A FastAPI + MongoDB service for employee attendance tracking, manual regularization with an audit trail, and analytics aggregation pipelines.
+A production-grade FastAPI + MongoDB service for employee attendance tracking, manual regularization with an audit trail, and analytics aggregation pipelines.
+
+## Architecture
+
+```
+HTTP Clients (Mobile / Web / Bio-device)
+                │
+                ▼ [FastAPI REST Boundary - Instants normalized to UTC]
+┌─────────────────────────────────────────────────────────────┐
+│                       app/main.py                           │
+│  ┌──────────┐  ┌───────────┐  ┌───────────┐  ┌──────────┐   │
+│  │employees │  │attendance │  │ analytics │  │  admin   │   │
+│  │ (CRUD)   │  │(R1-R5 FSM)│  │ (Pipelines│  │ (Explain)│   │
+│  └────┬─────┘  └─────┬─────┘  └─────┬─────┘  └────┬─────┘   │
+│       │              │              │             │         │
+│       ▼              ▼              ▼             ▼         │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  PyMongo ODM/Driver (tz_aware=True, Idempotency TTL) │   │
+│  └──────────────────────────┬───────────────────────────┘   │
+└─────────────────────────────┼───────────────────────────────┘
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    MongoDB 6.0+ Database                    │
+│   • employees         (Unique emp_code, department index)   │
+│   • attendance_logs   (Compound natural key, IXSCAN plans)  │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Requirements
 - Python 3.11+
@@ -14,7 +40,6 @@ A FastAPI + MongoDB service for employee attendance tracking, manual regularizat
    ```
 
 2. **Configure environment (optional):**
-   Set `MONGO_URI` and `MONGO_DB` (defaults to `mongodb://localhost:27017` and `attendance_db`):
    ```bash
    export MONGO_URI="mongodb://localhost:27017"
    export MONGO_DB="attendance_db"
@@ -22,7 +47,8 @@ A FastAPI + MongoDB service for employee attendance tracking, manual regularizat
 
 3. **Seed database:**
    ```bash
-   python sample_seed.py
+   python sample_seed.py           # Loads clean + realistic messy edge cases
+   python sample_seed.py --clean   # Loads only standard sample data
    ```
 
 4. **Run the API:**
@@ -36,10 +62,11 @@ A FastAPI + MongoDB service for employee attendance tracking, manual regularizat
    pytest tests/test_business_rules.py -v
    ```
 
-## Notes
-- All application code is self-contained in `app/main.py`.
-- Database indexes are created automatically and idempotently on startup.
-- All timestamps in API inputs and outputs use integer epoch milliseconds.
-- Stored derived values (`work_hours`, `late_minutes`, `overtime_minutes`, `half_day`) are authoritative.
-- Architectural design decisions are documented in `DECISIONS.md`.
-- Code review of the starter code is documented in `REVIEW.md`.
+## Architectural Highlights
+- **Single-File Architecture:** All application logic is self-contained in `app/main.py`.
+- **Atomic Concurrency:** Unique compound index on `(emp_code, date)` prevents race conditions at the database layer without locks.
+- **Pure Aggregation Pipelines:** Analytics endpoints leverage MongoDB aggregation (`$setWindowFields` with `$rank` for competition ranking, cross-collection joins for headcount).
+- **Timezone Boundary:** Instants are converted to UTC at the API boundary; IST (+05:30) is applied purely for shift/date calculations (R1).
+- **Audit Trail:** Manual corrections append immutable diffs to `history[]` with optimistic locking.
+- **Architectural Trade-offs:** Detailed in `DECISIONS.md`.
+- **Starter Code Review:** Detailed in `REVIEW.md`.

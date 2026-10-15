@@ -10,15 +10,27 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from calendar import monthrange
 from datetime import date as DateType, datetime, timedelta, timezone
+from enum import Enum
 from typing import Annotated, Any, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Header
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pymongo import ASCENDING, DESCENDING, MongoClient, ReturnDocument
 from pymongo.errors import DuplicateKeyError
+
+# Formal domain states for attendance lifecycle
+class AttendanceState(str, Enum):
+    OUT = "OUT"
+    PUNCHED_IN = "PUNCHED_IN"
+    PUNCHED_OUT = "PUNCHED_OUT"
+
+
+# 30-second TTL cache for optional Idempotency-Key header support
+_idempotency_cache: dict[str, tuple[float, dict]] = {}
 
 # ---------------------------------------------------------------------------
 # 1. Environment & Database Configuration
@@ -409,7 +421,16 @@ def list_employees(
 # 8. Attendance Endpoints
 # ---------------------------------------------------------------------------
 @app.post("/attendance/punch-in", status_code=201, tags=["attendance"])
-def punch_in(body: PunchInRequest):
+def punch_in(
+    body: PunchInRequest,
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+):
+    if idempotency_key:
+        now_epoch = time.time()
+        cached = _idempotency_cache.get(idempotency_key)
+        if cached and (now_epoch - cached[0] < 30.0):
+            return cached[1]
+
     db = get_db()
     emp = db.employees.find_one({"emp_code": body.emp_code})
     if emp is None:
@@ -439,7 +460,11 @@ def punch_in(body: PunchInRequest):
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Employee already has a record for this attendance date")
 
-    return serialize_attendance(doc)
+    response_doc = serialize_attendance(doc)
+    if idempotency_key:
+        _idempotency_cache[idempotency_key] = (time.time(), response_doc)
+
+    return response_doc
 
 
 @app.post("/attendance/punch-out", status_code=200, tags=["attendance"])
